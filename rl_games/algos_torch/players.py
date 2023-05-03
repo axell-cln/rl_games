@@ -24,6 +24,7 @@ class PpoPlayerContinuous(BasePlayer):
         self.actions_high = torch.from_numpy(self.action_space.high.copy()).float().to(self.device)
         self.mask = [False]
 
+        self.normalize_input_keys = self.config['normalize_input_keys']
         self.normalize_input = self.config['normalize_input']
         self.normalize_value = self.config.get('normalize_value', False)
 
@@ -35,6 +36,7 @@ class PpoPlayerContinuous(BasePlayer):
             'value_size': self.env_info.get('value_size',1),
             'normalize_value': self.normalize_value,
             'normalize_input': self.normalize_input,
+            'normalize_input_keys': self.normalize_input_keys,
         } 
         self.model = self.network.build(config)
         self.model.to(self.device)
@@ -93,6 +95,7 @@ class PpoPlayerDiscrete(BasePlayer):
             self.actions_num = [action.n for action in self.action_space]
             self.is_multi_discrete = True
         self.mask = [False]
+        self.normalize_input_keys = self.config['normalize_input_keys']
         self.normalize_input = self.config['normalize_input']
         self.normalize_value = self.config.get('normalize_value', False)
         obs_shape = self.obs_shape
@@ -103,6 +106,7 @@ class PpoPlayerDiscrete(BasePlayer):
             'value_size': self.env_info.get('value_size',1),
             'normalize_value': self.normalize_value,
             'normalize_input': self.normalize_input,
+            'normalize_input_keys': self.normalize_input_keys,
         }
 
         self.model = self.network.build(config)

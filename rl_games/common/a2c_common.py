@@ -226,7 +226,6 @@ class A2CBase(BaseAlgorithm):
         self.minibatch_size_per_env = self.config.get('minibatch_size_per_env', 0)
         self.minibatch_size = self.config.get('minibatch_size', self.num_actors * self.minibatch_size_per_env)
         self.mini_epochs_num = self.config['mini_epochs']
-        print(self.batch_size)
         self.num_minibatches = self.batch_size // self.minibatch_size
         assert(self.batch_size % self.minibatch_size == 0)
 
