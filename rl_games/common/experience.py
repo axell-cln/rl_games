@@ -377,6 +377,7 @@ class ExperienceBuffer:
             for k,v in val.items():
                 self.tensor_dict[name][k][index,:] = v
         else:
+            #print("exp_update_data:", name, val.shape)
             self.tensor_dict[name][index,:] = val
 
 

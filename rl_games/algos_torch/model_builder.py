@@ -18,6 +18,7 @@ class NetworkBuilder:
         self.network_factory = object_factory.ObjectFactory()
         self.network_factory.set_builders(NETWORK_REGISTRY)
         self.network_factory.register_builder('actor_critic', lambda **kwargs: network_builder.A2CBuilder())
+        self.network_factory.register_builder('actor_critic_transformer', lambda **kwargs: network_builder.TransformerA2CBuilder())
         self.network_factory.register_builder('resnet_actor_critic',
                                               lambda **kwargs: network_builder.A2CResnetBuilder())
         self.network_factory.register_builder('rnd_curiosity', lambda **kwargs: network_builder.RNDCuriosityBuilder())
@@ -36,6 +37,8 @@ class ModelBuilder:
         self.model_factory = object_factory.ObjectFactory()
         self.model_factory.set_builders(MODEL_REGISTRY)
         self.model_factory.register_builder('discrete_a2c', lambda network, **kwargs: models.ModelA2C(network))
+        self.model_factory.register_builder('multi_discrete_transformer_a2c',
+                                            lambda network, **kwargs: models.ModelTransformerA2CMultiDiscrete(network))
         self.model_factory.register_builder('multi_discrete_a2c',
                                             lambda network, **kwargs: models.ModelA2CMultiDiscrete(network))
         self.model_factory.register_builder('continuous_a2c',

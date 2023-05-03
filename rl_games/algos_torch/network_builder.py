@@ -9,6 +9,7 @@ import torch.optim as optim
 import math
 import numpy as np
 from rl_games.algos_torch.d2rl import D2RLNet
+from rl_games.algos_torch.transformer_utils import TransformerModel
 from rl_games.algos_torch.sac_helper import  SquashedNormal
 from rl_games.common.layers.recurrent import  GRUWithDones, LSTMWithDones
 from rl_games.common.layers.value import  TwoHotEncodedValue, DefaultValue
@@ -69,7 +70,7 @@ class NetworkBuilder:
         def get_default_rnn_state(self):
             return None
 
-        def _calc_input_size(self, input_shape,cnn_layers=None):
+        def _calc_input_size(self, input_shape, cnn_layers=None):
             if cnn_layers is None:
                 assert(len(input_shape) == 1)
                 return input_shape[0]
@@ -971,3 +972,142 @@ class SACBuilder(NetworkBuilder):
                 self.is_discrete = False
                 self.is_continuous = False
 
+class TransformerA2CBuilder(NetworkBuilder):
+    def __init__(self, **kwargs):
+        NetworkBuilder.__init__(self)
+
+    def load(self, params):
+        self.params = params
+
+    class Network(NetworkBuilder.BaseNetwork):
+        def __init__(self, params, **kwargs):
+            actions_num = kwargs.pop('actions_num')
+            input_shape = kwargs.pop('input_shape')
+            self.value_size = kwargs.pop('value_size', 1)
+            self.num_seqs = num_seqs = kwargs.pop('num_seqs', 1)
+            NetworkBuilder.BaseNetwork.__init__(self)
+            self.load(params)
+
+            net_act = self.activations_factory.create(self.activation)
+            self.actor = TransformerModel(self.transformer, input_shape, net_act)
+            #self.critic = TransformerModel(self.transformer, input_shape, net_act)
+
+            out_size = self.transformer["decoder_mlp_dim"][-1]
+
+            self.value = self._build_value_layer(out_size, self.value_size)
+            self.value_act = self.activations_factory.create(self.value_activation)
+
+            if self.is_discrete:
+                self.logits = torch.nn.Linear(out_size*self.transformer["input_sequence_length"], actions_num)
+            '''
+                for multidiscrete actions num is a tuple
+            '''
+            if self.is_multi_discrete:
+                #self.logits = torch.nn.ModuleList([torch.nn.Linear(out_size, num) for num in actions_num])
+                self.logits = torch.nn.Linear(out_size, actions_num[0])
+            if self.is_continuous:
+                self.mu = torch.nn.Linear(out_size*self.transformer["input_sequece_length"], actions_num)
+                self.mu_act = self.activations_factory.create(self.space_config['mu_activation']) 
+                mu_init = self.init_factory.create(**self.space_config['mu_init'])
+                self.sigma_act = self.activations_factory.create(self.space_config['sigma_activation']) 
+                sigma_init = self.init_factory.create(**self.space_config['sigma_init'])
+
+                if self.fixed_sigma:
+                    self.sigma = nn.Parameter(torch.zeros(actions_num, requires_grad=True, dtype=torch.float32), requires_grad=True)
+                else:
+                    self.sigma = torch.nn.Linear(out_size, actions_num)
+
+            #self.critic.init_weights()
+            #self.actor.init_weights()
+
+            if self.is_continuous:
+                mu_init(self.mu.weight)
+                if self.fixed_sigma:
+                    sigma_init(self.sigma)
+                else:
+                    sigma_init(self.sigma.weight)  
+
+        def forward(self, obs_dict):
+            obs = obs_dict['obs']
+            states = obs_dict.get('rnn_states', None)
+            seq_length = obs_dict.get('seq_length', 1)
+            dones = obs_dict.get('dones', None)
+            a_out, attn_maps, batch_size = self.actor(obs, None)
+            #print("=======")
+            #print(obs["masks"][0])
+            #print(obs["transforms"][0])
+            #print(obs["state"][0])
+            #c_out, attn_maps, batch_size = self.critic(obs, None)
+            #a_out = c_out = self.actor(obs, None, False)
+            #c_out = c_out.reshape(batch_size, -1)
+            value = self.value_act(self.value(a_out))
+            value = value * (1 - obs["masks"].float().view(*obs["masks"].shape,1))
+            value = torch.divide(torch.sum(value, dim=1, keepdim=True), self.transformer['input_sequence_length']).reshape(-1,1)
+            #print("B, 1", value.shape)
+            if self.is_discrete:
+                #a_out = a_out.reshape(batch_size, -1)
+                logits = self.logits(a_out)
+                return logits, value, states
+
+            if self.is_multi_discrete:
+                #print(a_out.shape)
+                logits = self.logits(a_out)
+                #print("B, N, 2", logits.shape)
+                #logits = logits.permute(1,0,2) # Needed as I think they perform this op later on.
+                #logits = logits.permute(1,0,2) # Needed as I think they perform this op later on.
+                #print("N, B, 2", logits.shape)
+                logits = [logits[:,i,:] for i in range(self.transformer['input_sequence_length'])]
+                #print(logits.shape)
+                return logits, value, states
+
+            if self.is_continuous:
+                a_out = a_out.reshape(batch_size, -1)
+                mu = self.mu_act(self.mu(a_out))
+                if self.fixed_sigma:
+                    sigma = mu * 0.0 + self.sigma_act(self.sigma)
+                else:
+                    sigma = self.sigma_act(self.sigma(a_out))
+
+                return mu, sigma, value, states
+                    
+        def is_separate_critic(self):
+            return True
+
+        def is_rnn(self):
+            return False
+
+        def get_default_rnn_state(self):
+            return None
+
+        def load(self, params):
+            self.separate = True
+            self.transformer = params['transformer']
+            self.activation = params['transformer']['activation']
+            self.initializer = params['transformer']['initializer']
+            #self.norm_only_first_layer = params['mlp'].get('norm_only_first_layer', False)
+            self.value_activation = params.get('value_activation', 'None')
+            self.normalization = params.get('normalization', None)
+            self.has_rnn = False
+            self.has_space = 'space' in params
+            self.central_value = params.get('central_value', False)
+            self.joint_obs_actions_config = params.get('joint_obs_actions', None)
+
+            if self.has_space:
+                self.is_multi_discrete = 'multi_discrete'in params['space']
+                self.is_discrete = 'discrete' in params['space']
+                self.is_continuous = 'continuous'in params['space']
+                if self.is_continuous:
+                    self.space_config = params['space']['continuous']
+                    self.fixed_sigma = self.space_config['fixed_sigma']
+                elif self.is_discrete:
+                    self.space_config = params['space']['discrete']
+                elif self.is_multi_discrete:
+                    self.space_config = params['space']['multi_discrete']
+            else:
+                self.is_discrete = False
+                self.is_continuous = False
+                self.is_multi_discrete = False
+
+    def build(self, name, **kwargs):
+        net = TransformerA2CBuilder.Network(self.params, **kwargs)
+        return net
