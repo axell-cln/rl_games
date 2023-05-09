@@ -154,8 +154,8 @@ class A2CBase(BaseAlgorithm):
         self.ppo = config.get('ppo', True)
         self.max_epochs = self.config.get('max_epochs', -1)
         self.max_frames = self.config.get('max_frames', -1)
-
         self.is_adaptive_lr = config['lr_schedule'] == 'adaptive'
+        self.is_transformer_lr = config['lr_schedule'] == 'transformer'
         self.linear_lr = config['lr_schedule'] == 'linear'
         self.schedule_type = config.get('schedule_type', 'legacy')
 
@@ -163,7 +163,12 @@ class A2CBase(BaseAlgorithm):
         if self.is_adaptive_lr:
             self.kl_threshold = config['kl_threshold']
             self.scheduler = schedulers.AdaptiveScheduler(self.kl_threshold)
-
+        elif self.is_transformer_lr:
+            self.warmup_factor = config.get('warmup_factor', 0.1)
+            self.warmup_steps = config.get('warmup_steps', 5)
+            self.min_lr = config.get('min_lr', 0) 
+            self.base_lr = config.get('base_lr', 3e-4)
+            self.scheduler = schedulers.TransformerScheduler(min_lr = self.min_lr, base_lr=self.base_lr, warmup_steps=self.warmup_steps, warmup_factor=self.warmup_factor, max_iter=self.max_epochs)
         elif self.linear_lr:
             
             if self.max_epochs == -1 and self.max_frames == -1:
@@ -197,7 +202,7 @@ class A2CBase(BaseAlgorithm):
         self.normalize_advantage = config['normalize_advantage']
         self.normalize_rms_advantage = config.get('normalize_rms_advantage', False)
         self.normalize_input = self.config['normalize_input']
-        self.normalize_input_keys = self.config['normalize_input_keys']
+        self.normalize_input_keys = self.config.get('normalize_input_keys', [])
         self.normalize_value = self.config.get('normalize_value', False)
         self.truncate_grads = self.config.get('truncate_grads', False)
 
