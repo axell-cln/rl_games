@@ -19,6 +19,8 @@ class NetworkBuilder:
         self.network_factory.set_builders(NETWORK_REGISTRY)
         self.network_factory.register_builder('actor_critic', lambda **kwargs: network_builder.A2CBuilder())
         self.network_factory.register_builder('actor_critic_transformer', lambda **kwargs: network_builder.TransformerA2CBuilder())
+        self.network_factory.register_builder('actor_critic_metamorph', lambda **kwargs: network_builder.MetamorphA2CBuilder())
+        #self.network_factory.register_builder('actor_critic_mlp_dict', lambda **kwargs: network_builder.MLPDictA2CBuilder())
         self.network_factory.register_builder('resnet_actor_critic',
                                               lambda **kwargs: network_builder.A2CResnetBuilder())
         self.network_factory.register_builder('rnd_curiosity', lambda **kwargs: network_builder.RNDCuriosityBuilder())
