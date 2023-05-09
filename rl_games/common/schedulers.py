@@ -1,4 +1,4 @@
-
+import math
 
 class RLScheduler:
     def __init__(self):
@@ -31,6 +31,24 @@ class AdaptiveScheduler(RLScheduler):
             lr = min(current_lr * 1.5, self.max_lr)
         return lr, entropy_coef         
 
+class TransformerScheduler(RLScheduler):
+    def __init__(self, min_lr=0, base_lr=3e-4, warmup_steps=10, warmup_factor=0.1, max_iter=1000, **kwargs):
+        super().__init__()
+        self.warmup_steps = warmup_steps
+        self.warmup_factor = warmup_factor
+        self.min_lr = min_lr
+        self.base_lr = base_lr
+        self.max_iter = max_iter
+
+    def update(self, current_lr, entropy_coef, epoch, frames, kl_dist, **kwargs):
+        lr = 0.5 * (1.0 + math.cos(math.pi * epoch / self.max_iter))
+        lr = (1.0  - self.min_lr) * lr + self.min_lr
+        lr *= self.base_lr
+        if epoch < self.warmup_steps:
+            alpha = epoch / self.warmup_steps
+            warmup_factor = self.warmup_factor * (1 - alpha) + alpha
+            lr *= warmup_factor
+        return lr, entropy_coef
 
 class LinearScheduler(RLScheduler):
     def __init__(self, start_lr, min_lr=1e-6, max_steps=1000000, use_epochs=True, apply_to_entropy=False, **kwargs):
