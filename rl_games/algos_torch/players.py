@@ -149,7 +149,6 @@ class PpoPlayerDiscrete(BasePlayer):
         if self.has_batch_dimension == False:
             obs = unsqueeze_obs(obs)
         obs = self._preproc_obs(obs)
-
         self.model.eval()
         input_dict = {
             'is_train': False,
@@ -164,10 +163,11 @@ class PpoPlayerDiscrete(BasePlayer):
         self.states = res_dict['rnn_states']
         if self.is_multi_discrete:
             if is_deterministic:
-                action = [torch.argmax(logit.detach(), axis=1).squeeze() for logit in logits]
+                action = [torch.argmax(logit.detach(), axis=-1).squeeze() for logit in logits]
                 return torch.stack(action,dim=-1)
             else:    
                 return action.squeeze().detach()
+
         else:
             if is_deterministic:
                 return torch.argmax(logits.detach(), axis=-1).squeeze()
