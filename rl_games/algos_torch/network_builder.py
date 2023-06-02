@@ -1579,9 +1579,9 @@ class MLPDictThrusterA2CBuilder(NetworkBuilder):
             self.has_space = 'space' in params
             self.central_value = params.get('central_value', False)
             self.joint_obs_actions_config = params.get('joint_obs_actions', None)
-            self.use_state_pe = params.get('use_state_encoding', False)
-            self.pe_nfreq = params.get('pe_nfreq', 6)
-            self.pe_log = params.get('pe_log', False)
+            self.use_state_pe = params['mlp'].get('use_state_encoding', False)
+            self.pe_nfreq = params['mlp'].get('pe_nfreq', 6)
+            self.pe_log = params['mlp'].get('pe_log', False)
 
             if self.has_space:
                 self.is_multi_discrete = 'multi_discrete'in params['space']
