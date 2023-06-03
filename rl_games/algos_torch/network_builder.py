@@ -994,9 +994,18 @@ class TransformerA2CBuilder(NetworkBuilder):
             self.actor = TransformerModel(self.transformer, input_shape, net_act)
             out_size = self.transformer["decoder_mlp_dim"][-1]
             # Critic is MLP (we don't need to know the transforms to estimate Q)
+            #mlp_args = {
+            #    'input_size' : input_shape["state"][0], 
+            #    'units' : self.transformer["state_mlp_dim"], 
+            #    'activation' : self.activation, 
+            #    'norm_func_name' : self.normalization,
+            #    'dense_func' : torch.nn.Linear,
+            #    'd2rl' : False,
+            #    'norm_only_first_layer' : False
+            #}
             mlp_args = {
-                'input_size' : input_shape["state"][0], 
-                'units' : self.transformer["state_mlp_dim"], 
+                'input_size' : self.transformer["decoder_mlp_dim"][-1]*self.seq_len, 
+                'units' : self.transformer["critic_mlp_dim"], 
                 'activation' : self.activation, 
                 'norm_func_name' : self.normalization,
                 'dense_func' : torch.nn.Linear,
@@ -1005,7 +1014,8 @@ class TransformerA2CBuilder(NetworkBuilder):
             }
             self.critic = self._build_mlp(**mlp_args)
             # Value decoder
-            self.value = self._build_value_layer(self.transformer["state_mlp_dim"][-1], self.value_size)
+            #self.value = self._build_value_layer(self.transformer["state_mlp_dim"][-1], self.value_size)
+            self.value = self._build_value_layer(self.transformer["critic_mlp_dim"][-1], self.value_size)
             self.value_act = self.activations_factory.create(self.value_activation)
 
             # Sets the last policy layers based on the action type
@@ -1047,8 +1057,8 @@ class TransformerA2CBuilder(NetworkBuilder):
             states = obs_dict.get('rnn_states', None)
             # Get the encoded tokens
             a_out, attn_maps, batch_size = self.actor(obs, None)
-            # Get the value
-            c_out = self.critic(obs['state'])
+            # Get the value 
+            c_out = self.critic(a_out.flatten(1,-1))
             value = self.value_act(self.value(c_out))
             # Get the policy
             if self.is_discrete:
