@@ -182,8 +182,6 @@ class NetworkBuilder:
 
             raise ValueError('value type is not "default", "legacy" or "two_hot_encoded"')
 
-
-
 class A2CBuilder(NetworkBuilder):
     def __init__(self, **kwargs):
         NetworkBuilder.__init__(self)
@@ -1611,4 +1609,298 @@ class MLPDictThrusterA2CBuilder(NetworkBuilder):
 
     def build(self, name, **kwargs):
         net = MLPDictThrusterA2CBuilder.Network(self.params, **kwargs)
+        return net
+
+class RNNDictA2CBuilder(NetworkBuilder):
+    def __init__(self, **kwargs):
+        NetworkBuilder.__init__(self)
+
+    def load(self, params):
+        self.params = params
+
+    class Network(NetworkBuilder.BaseNetwork):
+        def __init__(self, params, **kwargs):
+            actions_num = kwargs.pop('actions_num')
+            input_shape = kwargs.pop('input_shape')
+            self.value_size = kwargs.pop('value_size', 1)
+            self.num_seqs = num_seqs = kwargs.pop('num_seqs', 1)
+            NetworkBuilder.BaseNetwork.__init__(self)
+            self.load(params)
+            self.actor_mlp = nn.Sequential()
+            self.critic_mlp = nn.Sequential()
+
+
+            in_mlp_shape = input_shape['state'][0]
+            out_size = self.first_mlp_units[-1]
+
+            rnn_in_size = out_size
+            out_size = self.rnn_units
+            if self.rnn_concat_input:
+                rnn_in_size += in_mlp_shape
+
+            self.a_rnn = self._build_rnn(self.rnn_name, rnn_in_size, self.rnn_units, self.rnn_layers)
+            if self.rnn_ln:
+                self.a_layer_norm = torch.nn.LayerNorm(self.rnn_units)
+
+            if self.separate:
+                self.c_rnn = self._build_rnn(self.rnn_name, rnn_in_size, self.rnn_units, self.rnn_layers)
+                if self.rnn_ln:
+                    self.c_layer_norm = torch.nn.LayerNorm(self.rnn_units)
+
+            print(self.first_mlp_units)
+            first_mlp_args = {
+                'input_size' : in_mlp_shape, 
+                'units' : self.first_mlp_units, 
+                'activation' : self.activation, 
+                'norm_func_name' : self.normalization,
+                'dense_func' : torch.nn.Linear,
+                'd2rl' : self.is_d2rl,
+                'norm_only_first_layer' : self.norm_only_first_layer
+            }
+
+            second_mlp_args = {
+                'input_size' : out_size, 
+                'units' : self.second_mlp_units, 
+                'activation' : self.activation, 
+                'norm_func_name' : self.normalization,
+                'dense_func' : torch.nn.Linear,
+                'd2rl' : self.is_d2rl,
+                'norm_only_first_layer' : self.norm_only_first_layer
+            }
+
+            self.first_actor_mlp = self._build_mlp(**first_mlp_args)
+            self.second_actor_mlp = self._build_mlp(**second_mlp_args)
+
+            if self.separate:
+                self.first_critic_mlp = self._build_mlp(**first_mlp_args)
+                self.second_critic_mlp = self._build_mlp(**second_mlp_args)
+
+            self.value = self._build_value_layer(out_size, self.value_size)
+            self.value_act = self.activations_factory.create(self.value_activation)
+
+            if self.is_discrete:
+                self.logits = torch.nn.Linear(out_size, actions_num)
+            '''
+                for multidiscrete actions num is a tuple
+            '''
+            if self.is_multi_discrete:
+                self.logits = torch.nn.ModuleList([torch.nn.Linear(out_size, num) for num in actions_num])
+            if self.is_continuous:
+                self.mu = torch.nn.Linear(out_size, actions_num)
+                self.mu_act = self.activations_factory.create(self.space_config['mu_activation']) 
+                mu_init = self.init_factory.create(**self.space_config['mu_init'])
+                self.sigma_act = self.activations_factory.create(self.space_config['sigma_activation']) 
+                sigma_init = self.init_factory.create(**self.space_config['sigma_init'])
+
+                if self.fixed_sigma:
+                    self.sigma = nn.Parameter(torch.zeros(actions_num, requires_grad=True, dtype=torch.float32), requires_grad=True)
+                else:
+                    self.sigma = torch.nn.Linear(out_size, actions_num)
+
+            mlp_init = self.init_factory.create(**self.initializer)
+
+            for m in self.modules():         
+                if isinstance(m, nn.Linear):
+                    mlp_init(m.weight)
+                    if getattr(m, "bias", None) is not None:
+                        torch.nn.init.zeros_(m.bias)    
+
+            if self.is_continuous:
+                mu_init(self.mu.weight)
+                if self.fixed_sigma:
+                    sigma_init(self.sigma)
+                else:
+                    sigma_init(self.sigma.weight)  
+
+        def forward(self, obs_dict):
+            obs = obs_dict['obs']
+            states = obs_dict.get('rnn_states', None)
+            seq_length = obs_dict.get('seq_length', 1)
+            dones = obs_dict.get('dones', None)
+            bptt_len = obs_dict.get('bptt_len', 0)
+
+            if self.separate:
+                # Duplicate for actor and critic
+                a_out = c_out = obs['state']
+                # Reshape for mlp processing
+                a_out_in = a_out.contiguous().view(a_out.size(0), -1)
+                c_out_in = c_out.contiguous().view(c_out.size(0), -1)
+                # Apply first mlp and critic                    
+                a_out = self.first_actor_mlp(a_out_in)
+                c_out = self.first_critic_mlp(c_out_in)
+                # If need to concat mlp output, with raw input, do. (Residual style)
+                if self.rnn_concat_input:
+                    a_out = torch.cat([a_out, a_out_in], dim=1)
+                    c_out = torch.cat([c_out, c_out_in], dim=1)
+                # Reshape for sequence processing
+                batch_size = a_out.size()[0]
+                num_seqs = batch_size // seq_length
+                a_out = a_out.reshape(num_seqs, seq_length, -1)
+                c_out = c_out.reshape(num_seqs, seq_length, -1)
+                a_out = a_out.transpose(0,1)
+                c_out = c_out.transpose(0,1)
+                if dones is not None:
+                    dones = dones.reshape(num_seqs, seq_length, -1)
+                    dones = dones.transpose(0,1)
+                # Run the RNN
+                if len(states) == 2:
+                    a_states = states[0]
+                    c_states = states[1]
+                else:
+                    a_states = states[:2]
+                    c_states = states[2:]                        
+                a_out, a_states = self.a_rnn(a_out, a_states, dones, bptt_len)
+                c_out, c_states = self.c_rnn(c_out, c_states, dones, bptt_len)
+                # Reshape for second MLP
+                a_out = a_out.transpose(0,1)
+                c_out = c_out.transpose(0,1)
+                a_out = a_out.contiguous().reshape(a_out.size()[0] * a_out.size()[1], -1)
+                c_out = c_out.contiguous().reshape(c_out.size()[0] * c_out.size()[1], -1)
+                # Apply layer norm
+                if self.rnn_ln:
+                    a_out = self.a_layer_norm(a_out)
+                    c_out = self.c_layer_norm(c_out)
+                if type(a_states) is not tuple:
+                    a_states = (a_states,)
+                    c_states = (c_states,)
+                states = a_states + c_states
+                # Apply second MLP
+                a_out = self.second_actor_mlp(a_out)
+                c_out = self.second_critic_mlp(c_out)
+                # Compute value                
+                value = self.value_act(self.value(c_out))
+                # Get actions
+                if self.is_discrete:
+                    logits = self.logits(a_out)
+                    return logits, value, states
+                if self.is_multi_discrete:
+                    logits = [logit(a_out) for logit in self.logits]
+                    return logits, value, states
+                if self.is_continuous:
+                    mu = self.mu_act(self.mu(a_out))
+                    if self.fixed_sigma:
+                        sigma = mu * 0.0 + self.sigma_act(self.sigma)
+                    else:
+                        sigma = self.sigma_act(self.sigma(a_out))
+
+                    return mu, sigma, value, states
+            else:
+                # Reshape for mlp processing
+                out_in = obs['state'].contiguous().view(obs['state'].size(0), -1)
+                # Apply first mlp
+                out = self.first_actor_mlp(out_in)
+                # If need to concat mlp output, with raw input, do. (Residual style)
+                if self.rnn_concat_input:
+                    out = torch.cat([out, out_in], dim=1)
+                # Reshape for sequence processing
+                batch_size = out.size()[0]
+                num_seqs = batch_size // seq_length
+                out = out.reshape(num_seqs, seq_length, -1)
+                # Run the RNN
+                if len(states) == 1:
+                    states = states[0]
+                out = out.transpose(0, 1)
+                if dones is not None:
+                    dones = dones.reshape(num_seqs, seq_length, -1)
+                    dones = dones.transpose(0, 1)
+                out, states = self.a_rnn(out, states, dones, bptt_len)
+                # Reshape for second MLP
+                out = out.transpose(0, 1)
+                out = out.contiguous().reshape(out.size()[0] * out.size()[1], -1)
+                # Apply layer norm
+                if self.rnn_ln:
+                    out = self.layer_norm(out)
+                if type(states) is not tuple:
+                    states = (states,)
+                # Apply second MLP
+                out = self.second_actor_mlp(out)
+                # Compute value
+                value = self.value_act(self.value(out))
+                if self.central_value:
+                    return value, states
+                # Get actions
+                if self.is_discrete:
+                    logits = self.logits(out)
+                    return logits, value, states
+                if self.is_multi_discrete:
+                    logits = [logit(out) for logit in self.logits]
+                    return logits, value, states
+                if self.is_continuous:
+                    mu = self.mu_act(self.mu(out))
+                    if self.fixed_sigma:
+                        sigma = self.sigma_act(self.sigma)
+                    else:
+                        sigma = self.sigma_act(self.sigma(out))
+                    return mu, mu*0 + sigma, value, states
+                    
+        def is_separate_critic(self):
+            return self.separate
+
+        def is_rnn(self):
+            return self.has_rnn
+
+        def get_default_rnn_state(self):
+            if not self.has_rnn:
+                return None
+            num_layers = self.rnn_layers
+            if self.rnn_name == 'identity':
+                rnn_units = 1
+            else:
+                rnn_units = self.rnn_units
+            if self.rnn_name == 'lstm':
+                if self.separate:
+                    return (torch.zeros((num_layers, self.num_seqs, rnn_units)), 
+                            torch.zeros((num_layers, self.num_seqs, rnn_units)),
+                            torch.zeros((num_layers, self.num_seqs, rnn_units)), 
+                            torch.zeros((num_layers, self.num_seqs, rnn_units)))
+                else:
+                    return (torch.zeros((num_layers, self.num_seqs, rnn_units)), 
+                            torch.zeros((num_layers, self.num_seqs, rnn_units)))
+            else:
+                if self.separate:
+                    return (torch.zeros((num_layers, self.num_seqs, rnn_units)), 
+                            torch.zeros((num_layers, self.num_seqs, rnn_units)))
+                else:
+                    return (torch.zeros((num_layers, self.num_seqs, rnn_units)),)                
+
+        def load(self, params):
+            self.separate = params.get('separate', False)
+            self.first_mlp_units = params['mlp']['first_units']
+            self.second_mlp_units = params['mlp']['second_units']
+            self.activation = params['mlp']['activation']
+            self.initializer = params['mlp']['initializer']
+            self.is_d2rl = params['mlp'].get('d2rl', False)
+            self.norm_only_first_layer = params['mlp'].get('norm_only_first_layer', False)
+            self.value_activation = params.get('value_activation', 'None')
+            self.normalization = params.get('normalization', None)
+            self.has_rnn = 'rnn' in params
+            self.has_space = 'space' in params
+            self.central_value = params.get('central_value', False)
+            self.joint_obs_actions_config = params.get('joint_obs_actions', None)
+
+            if self.has_space:
+                self.is_multi_discrete = 'multi_discrete'in params['space']
+                self.is_discrete = 'discrete' in params['space']
+                self.is_continuous = 'continuous'in params['space']
+                if self.is_continuous:
+                    self.space_config = params['space']['continuous']
+                    self.fixed_sigma = self.space_config['fixed_sigma']
+                elif self.is_discrete:
+                    self.space_config = params['space']['discrete']
+                elif self.is_multi_discrete:
+                    self.space_config = params['space']['multi_discrete']
+            else:
+                self.is_discrete = False
+                self.is_continuous = False
+                self.is_multi_discrete = False
+
+            if self.has_rnn:
+                self.rnn_units = params['rnn']['units']
+                self.rnn_layers = params['rnn']['layers']
+                self.rnn_name = params['rnn']['name']
+                self.rnn_ln = params['rnn'].get('layer_norm', False)
+                self.rnn_concat_input = params['rnn'].get('concat_input', False)
+
+    def build(self, name, **kwargs):
+        net = RNNDictA2CBuilder.Network(self.params, **kwargs)
         return net
